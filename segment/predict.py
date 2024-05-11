@@ -231,7 +231,6 @@ def run(
                 # print('ano:', imgseg)
 
                 # Write results
-                cnt_id = 0
                 for j, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
                     if save_txt:  # Write to file
                         segj = segments[j].reshape(-1)  # (n,2) to (n*2)
@@ -272,26 +271,13 @@ def run(
                         # model_cls.load_weight(checkpoint)
                         # result = model_cls.infer(imgbb_seg)
                         # print(f"Image: {p.stem}.jpg, Prediction: {result}")
-                        # if result == 0:
-                        #     color_label = 'black'
-                        # elif result == 1:
-                        #     color_label = 'blue'
-                        # elif result == 2:
-                        #     color_label = 'red'
-                        # else:
-                        #     color_label = 'white'
                         # draw label in the image
-                        if cnt_id == 12 or cnt_id == 4 or cnt_id == 5 or cnt_id == 9:
-                            color_label = 'black'
-                        elif cnt_id == 6:
-                            color_label = 'white'
                         print(p.stem, color_label)
                         label = None if hide_labels else (
                             # f'{names[c][:5]}:{color_label}' if hide_conf else f'{names[c][:5]}{conf:.2f}{color_label}')
                             f'{names[c][:5]}:{color_label}' if hide_conf else f'{names[c][:5]}:{color_label}')
                         annotator.box_label(xyxy, label,
                                             color=colors(c, False))  # False thi mau sac ko trung voi mau segment
-                        cnt_id += 1
 
             # Stream results
             im0 = annotator.result()
