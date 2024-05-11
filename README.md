@@ -1,1 +1,2 @@
 # Inference_Classify_Motocycle
+python .\segment\predict.py --weights .\yolov9e-seg.pt --source '.\data\images\MicrosoftTeams-image.png' --save-crop --classes 1 2 3 -cp E:\Users\Admin\Desktop\Motocycle-Detection-BKAI\src\result_10kbb_segment\resnet50\resnet50-v3.ckpt --model_mp resnet50

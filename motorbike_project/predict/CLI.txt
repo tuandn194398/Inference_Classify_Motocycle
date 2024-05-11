@@ -1,0 +1,1 @@
+python -m motorbike_project.predict --model resnet50 --checkpoint .\result_10kbb_segment\resnet50\resnet50-v4.ckpt -fp .\data_color_segment\result\valid\images\ -csv data_color_segment/8210bb_segment12.csv
