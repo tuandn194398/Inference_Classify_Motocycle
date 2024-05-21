@@ -1,1 +1,1 @@
-python segment/predict.py --weights yolov9e-seg.pt --source data/images/MicrosoftTeams-image.png --save-crop --classes 1 2 3 --model_mp resnet50 --view-img
+python segment/predict.py --weights yolov9e-seg.pt --source test/images/ --save-crop --classes 1 2 3 --model_mp resnet50 -cp resnet50-v9.ckpt --conf-thres 0.6 --nosave --iou-thres 0.4 --retina-masks
