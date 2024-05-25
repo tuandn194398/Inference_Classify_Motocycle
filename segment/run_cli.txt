@@ -1,1 +1,1 @@
-python .\segment\predict.py --weights .\yolov9e-seg.pt --source .\data\videos\24_4.mp4 --save-crop --classes 1 2 3 -cp E:\Users\Admin\Desktop\Motocycle-Detection-BKAI\src\result_13kbb4cls\resnet50-v9.ckpt --model_mp restnet50 --view-img
+python .\segment\predict.py --weights .\yolov9e-seg.pt --source .\data\videos\24_4.mp4 --save-crop --classes 1 2 3 -cp E:\Users\Admin\Desktop\Motocycle-Detection-BKAI\src\result_13kbb4cls\resnet50-v9.ckpt --model_mp resnet50 --view-img

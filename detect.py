@@ -3,17 +3,14 @@ import os
 import platform
 import sys
 from pathlib import Path
-# from keras.models import load_model
+
 import numpy as np
-
-from PIL import Image
-from albumentations.pytorch import ToTensorV2
-import albumentations as A
-
 import torch
 
+from segment.inference import SegmentBB, Models
+
 FILE = Path(__file__).resolve()
-ROOT = FILE.parents[1]  # YOLO root directory
+ROOT = FILE.parents[0]  # YOLO root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
@@ -21,69 +18,14 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 from models.common import DetectMultiBackend
 from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
-                           increment_path, non_max_suppression, print_args, scale_boxes, scale_segments,
-                           strip_optimizer, xyxy2xywh)
+                           increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
-from utils.segment.general import masks2segments, process_mask
 from utils.torch_utils import select_device, smart_inference_mode
-import motorbike_project as mp
-
-
-class Transform:
-    def __init__(self):
-        self.transform = A.Compose([A.Resize(224, 224), A.Normalize(), ToTensorV2()])
-
-    def __call__(self, image):
-        return self.transform(image=image)["image"]
-
-
-class Models(torch.nn.Module):
-    def __init__(self, model: str = "resnet18", num_classes: int = 4):
-        super(Models, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        if model == "resnet18":
-            self.model = mp.ResNet18(num_classes=num_classes).to(self.device)
-        elif model == "vit":
-            self.model = mp.VisionTransformerBase(num_classes=num_classes).to(self.device)
-        if model == 'resnet50':
-            self.model = mp.ResNet50(num_classes=num_classes).to(self.device)
-        elif model == 'vit_tiny':
-            self.model = mp.VisionTransformerTiny(num_classes=num_classes).to(self.device)
-        elif model == 'swinv2_base':
-            self.model = mp.SwinV2Base(num_classes=num_classes).to(self.device)
-        elif model == 'mobilenetv3_large':
-            self.model = mp.MobileNetV3Large(num_classes=num_classes).to(self.device)
-
-        self.eval()
-
-    def forward(self, x):
-        return self.model(x)
-
-    def load_weight(self, weight_path: str):
-        checkpoint = torch.load(weight_path, map_location=self.device)
-        self.load_state_dict(checkpoint["state_dict"], strict=False)
-        # models_logger.info(f"Weight has been loaded from {weight_path}")
-        print(f"Weight has been loaded from {weight_path}")
-
-    def infer(self, image: Image) -> int:
-        # img_np = np.array(image.convert("RGB"))
-        img_np = np.array(image)
-        img = Transform()(img_np).to(self.device)
-
-        with torch.no_grad():
-            pred = self(img.unsqueeze(0))
-
-        return torch.argmax(pred, dim=1).item()
-
-    @property
-    def name(self):
-        return self.model.__class__.__name__
 
 
 @smart_inference_mode()
 def run(
-        weights=ROOT / 'yolo-seg.pt',  # model.pt path(s)
+        weights=ROOT / 'yolo.pt',  # model path or triton URL
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
         data=ROOT / 'data/coco.yaml',  # dataset.yaml path
         imgsz=(640, 640),  # inference size (height, width)
@@ -101,7 +43,7 @@ def run(
         augment=False,  # augmented inference
         visualize=False,  # visualize features
         update=False,  # update all models
-        project=ROOT / 'runs/predict-seg',  # save results to project/name
+        project=ROOT / 'runs/detect',  # save results to project/name
         name='exp',  # save results to project/name
         exist_ok=False,  # existing project/name ok, do not increment
         line_thickness=3,  # bounding box thickness (pixels)
@@ -110,9 +52,11 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
+        checkpoint=ROOT / 'resnet50.ckpt',
+        model_mp=ROOT / 'resnet18',
         retina_masks=False,
-        checkpoint='',
-        model_mp='resnet18'
+        weights_seg=ROOT / 'yolov9-seg.pt',
+        conf_seg=0.5,
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -132,12 +76,11 @@ def run(
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
-    # model classify color
-    # color_classes = ['black', 'red', 'blue', 'white']
-    # classify_model = load_model('color-segment 1.h5')
-    # use motorbike model (1)
+    # Load model classify color
     model_cls = Models(model=model_mp)
     model_cls.load_weight(checkpoint)
+    # Load model segment
+    model_seg = DetectMultiBackend(weights_seg, device=device, dnn=dnn, data=data, fp16=half)
 
     # Dataloader
     bs = 1  # batch_size
@@ -152,7 +95,7 @@ def run(
     vid_path, vid_writer = [None] * bs, [None] * bs
 
     # Run inference
-    model.warmup(imgsz=(1 if pt else bs, 3, *imgsz))  # warmup
+    model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
     for path, im, im0s, vid_cap, s in dataset:
         with dt[0]:
@@ -165,11 +108,11 @@ def run(
         # Inference
         with dt[1]:
             visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-            pred, proto = model(im, augment=augment, visualize=visualize)[:2]
+            pred = model(im, augment=augment, visualize=visualize)
 
         # NMS
         with dt[2]:
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det, nm=32)
+            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -187,128 +130,126 @@ def run(
             save_path = str(save_dir / p.name)  # im.jpg
             txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
             s += '%gx%g ' % im.shape[2:]  # print string
+            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
-            annotator = Annotator(im0, line_width=line_thickness, font_size=8, example=str(names))
-            imgwhite = im0.copy()  # tao mot anh background trang
-            imgwhite[:] = 0
-            # cv2.imwrite('anhtrang.png', imgwhite)
-            annotator_white = Annotator(imgwhite, line_width=line_thickness, example=str(names))
-
+            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
             if len(det):
-                # masks = process_mask(proto[i], det[:, 6:], det[:, :4], im.shape[2:], upsample=True)  # HWC
-                # masks = process_mask(proto[2].squeeze(0), det[:, 6:], det[:, :4], im.shape[2:], upsample=True)  # HWC
-                masks = process_mask(proto[-1][i], det[:, 6:], det[:, :4], im.shape[2:], upsample=True)  # HWC
-                det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()  # rescale boxes to im0 size
-
-                # Segments
-                if save_txt:
-                    # print("mặt nạ:", type(masks), masks)
-                    segments = reversed(masks2segments(masks))
-                    segments = [scale_segments(im.shape[2:], x, im0.shape, normalize=True) for x in segments]
-                    # print("mặt nạ segments:", type(segments), segments)
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
                 for c in det[:, 5].unique():
                     n = (det[:, 5] == c).sum()  # detections per class
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
-                # Mask plotting
-                # masks[4] = 0        # xóa segment object thứ len(masks) - 4
-                annotator.masks(masks,
-                                colors=[colors(x, True) for x in det[:, 5]],
-                                im_gpu=None if retina_masks else im[i])
-                annotator_white.masks(masks,
-                                      colors=[colors(x, True) for x in det[:, 5]],
-                                      im_gpu=None)
-
-                # tao anh chi chua phan segment
-                imglabel = annotator_white.result()
-                imglabel[imglabel[:, :, 0] > 0] = 1
-                imglabel[imglabel[:, :, 1] > 0] = 1
-                imglabel[imglabel[:, :, 2] > 0] = 1
-                imgsegs = imc * imglabel
-                # cv2.imwrite('anhlimgseg.png', imgseg)
-                # cv2.imwrite('anhlimc.png', imc)
-                # print('ano:', imgseg)
-
                 # Write results
-                for j, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
+                for *xyxy, conf, cls in reversed(det):
                     if save_txt:  # Write to file
-                        segj = segments[j].reshape(-1)  # (n,2) to (n*2)
-                        line = (cls, *segj, conf) if save_conf else (cls, *segj)  # label format
-                        # print('tọa độ segments', segj)
+                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
                         with open(f'{txt_path}.txt', 'a') as f:
                             f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
                     if save_img or save_crop or view_img:  # Add bbox to image
                         c = int(cls)  # integer class
                         # label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                        # annotator.box_label(xyxy, label,
-                        #                     color=colors(c, False))  # False thi mau sac ko trung voi mau segment
-                        # annotator.draw.polygon(segments[j], outline=colors(c, True), width=3)
+                        # annotator.box_label(xyxy, label, color=colors(c, True))
                     if save_crop:
-                        # save_one_box(xyxy, imc, file=save_dir / 'crops' / f'{p.stem}.jpg', BGR=True)
-                        # imgbb là ảnh bb
-                        # cv2.imwrite('anhdepbb.png', imgbb)
-                        imgbb_seg = save_one_box(xyxy, imgsegs,
-                                                 file=save_dir / 'crops' / names[c] / f'seg_{p.stem}.jpg', BGR=True,
-                                                 save=False)
-                        imgbb_seg[imgbb_seg[:, :, 0] == 0] = (255, 255, 255)
-                        # path_bbseg = save_dir / 'crops' / names[c] / f'segw_{p.stem}.jpg'
-                        path_bbseg = save_dir / 'test' / names[c] / f'{p.stem}.jpg'
-                        path_bbseg.parent.mkdir(parents=True, exist_ok=True)  # make directory
-                        fpath = str(increment_path(path_bbseg).with_suffix('.jpg'))
-                        cv2.imwrite(fpath, imgbb_seg)
-
-                    if save_img:
-                        # classify color
-                        # use exception model
-                        # imgbb_clf = cv2.resize(imgbb_seg, (299, 299))
-                        # imgbb_clf = np.expand_dims(imgbb_clf, axis=0)
-                        # pred = classify_model.predict(imgbb_clf)
-                        # idx = np.argmax(pred[0])
-                        # color_label = color_classes[idx]
-
-                        # use motorbike model (2)
-                        model_cls = Models(model=model_mp)
-                        model_cls.load_weight(checkpoint)
-                        result = model_cls.infer(imgbb_seg)
-                        print(f"Image: {p.stem}.jpg, Prediction: {result}")
-                        if result == 0:
-                            color_label = 'black'
-                        elif result == 1:
-                            color_label = 'blue'
-                        elif result == 2:
-                            color_label = 'red'
+                        x1, y1, x2, y2 = xyxy
+                        x1 -= torch.tensor(10, device=device)
+                        y1 -= torch.tensor(10, device=device)
+                        x2 += torch.tensor(10, device=device)
+                        y2 += torch.tensor(10, device=device)
+                        if y1 >= torch.tensor(0, device=device):
+                            xyxy[1] = y1
+                        if y2 <= torch.tensor(imc.shape[0], device=device):
+                            xyxy[3] = y2
+                        if x1 >= torch.tensor(0, device=device):
+                            xyxy[0] = x1
+                        if x2 <= torch.tensor(imc.shape[1], device=device):
+                            xyxy[2] = x2
+                        # if x2 - x1 < y2 - y1:
+                        #     offset = ((y2 - y1) - (x2 - x1)) // 2
+                        #     x11 = x1 - offset
+                        #     x22 = x2 + offset
+                        #     if x11 < torch.tensor(0, device=device):
+                        #         x22 += offset
+                        #         xyxy[2] = x22
+                        #     elif x22 >= torch.tensor(imc.shape[1], device=device):
+                        #         x11 -= offset
+                        #         xyxy[0] = x11
+                        #     else:
+                        #         xyxy[0] = x11
+                        #         xyxy[2] = x22
+                        #     if y1 >= torch.tensor(0, device=device):
+                        #         xyxy[1] = y1
+                        #     if y2 <= torch.tensor(imc.shape[0], device=device):
+                        #         xyxy[3] = y2
+                        # else:
+                        #     offset = ((x2 - x1) - (y2 - y1)) // 2
+                        #     y11 = y1 - offset
+                        #     y22 = y2 + offset
+                        #     if y11 < torch.tensor(0, device=device):
+                        #         y22 += offset
+                        #         xyxy[3] = y22
+                        #     elif y22 >= torch.tensor(imc.shape[0], device=device):
+                        #         y11 -= offset
+                        #         xyxy[1] = y11
+                        #     else:
+                        #         xyxy[3] = y22
+                        #         xyxy[1] = y11
+                        #     if x1 >= torch.tensor(0, device=device):
+                        #         xyxy[0] = x1
+                        #     if x2 <= torch.tensor(imc.shape[1], device=device):
+                        #         xyxy[2] = x2
+                        # bỏ qua bb kích thức nhỏ hơn 50 pixels
+                        maxsz = max(xyxy[2] - xyxy[0], xyxy[3] - xyxy[1])
+                        if maxsz < 50:
+                            print("Max size bb:", maxsz)
+                            continue
+                        imgbb = save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                        segmentbb = SegmentBB(model=model_seg, image=imgbb, classes=classes, conf_thres=conf_seg, retina_masks=retina_masks)
+                        rsegs = segmentbb.result()
+                        if len(rsegs) == 0:
+                            color_label = 'N/A'
+                            print("** Save bb segment: null")
                         else:
-                            color_label = 'white'
-                        # draw label in the image
-                        # if j == 8 or j == 5 or j == 9:
-                        #     color_label = 'black'
-                        # elif j == 6:
-                        #     color_label = 'white'
-                        # elif j == 3:
-                        #     color_label = 'blue'
-                        # elif j == 7:
-                        #     continue
-                        print(p.stem, color_label)
-                        label = None if hide_labels else (
-                            # f'{names[c][:5]}:{color_label}' if hide_conf else f'{names[c][:5]}{conf:.2f}{color_label}')
-                            f'{names[c][:5]}:{color_label}' if hide_conf else f'{j}{names[c][:5]}:{color_label}')
-                        annotator.box_label(xyxy, label,
-                                            color=colors(c, False))  # False thi mau sac ko trung voi mau segment
+                            print("** Save bb segment:", len(rsegs))
+                            for it in rsegs:
+                                rseg = it[0]
+                                # result = model_cls.infer(rseg)
+                                # if result == 0:
+                                #     color_label = 'black'
+                                # elif result == 1:
+                                #     color_label = 'blue'
+                                # elif result == 2:
+                                #     color_label = 'red'
+                                # else:
+                                #     color_label = 'white'
+                                # save bb segment
+                                # print("Save bb:", save_dir / 'crops_seg' / it[1] / f'{p.stem}.jpg', color_label)
+                                maxsz = max(rseg.shape[0], rseg.shape[1])
+                                if maxsz < 50:
+                                    print("Max size bb:", maxsz)
+                                    continue
+                                path_bbseg = save_dir / 'crops_seg' / it[1] / f'{p.stem}.jpg'
+                                path_bbseg.parent.mkdir(parents=True, exist_ok=True)  # make directory
+                                fpath = str(increment_path(path_bbseg).with_suffix('.jpg'))
+                                cv2.imwrite(fpath, rseg)
+                        # label = None if hide_labels else (
+                        #     names[c] if hide_conf else f'{names[c][:5]}{conf:.2f}{color_label}')
+                        # annotator.box_label(xyxy, label, color=colors(c, True))
+
 
             # Stream results
             im0 = annotator.result()
-
             if view_img:
                 if platform.system() == 'Linux' and p not in windows:
                     windows.append(p)
                     cv2.namedWindow(str(p), cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)  # allow window resize (Linux)
                     cv2.resizeWindow(str(p), im0.shape[1], im0.shape[0])
                 cv2.imshow(str(p), im0)
-                if cv2.waitKey(1) == ord('q'):  # 1 millisecond
-                    exit()
+                cv2.waitKey(1)  # 1 millisecond
 
             # Save results (image with detections)
             if save_img:
@@ -326,7 +267,7 @@ def run(
                         else:  # stream
                             fps, w, h = 30, im0.shape[1], im0.shape[0]
                         save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
-                        vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), 10, (w, h))
+                        vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     vid_writer[i].write(im0)
 
         # Print time (inference-only)
@@ -344,7 +285,7 @@ def run(
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolo-seg.pt', help='model path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolo.pt', help='model path or triton URL')
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
@@ -362,7 +303,7 @@ def parse_opt():
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--visualize', action='store_true', help='visualize features')
     parser.add_argument('--update', action='store_true', help='update all models')
-    parser.add_argument('--project', default=ROOT / 'runs/predict-seg', help='save results to project/name')
+    parser.add_argument('--project', default=ROOT / 'runs/detect', help='save results to project/name')
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
@@ -371,10 +312,14 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
-    parser.add_argument('--retina-masks', action='store_true', help='whether to plot masks in native resolution')
     parser.add_argument('--checkpoint', '-cp', type=str, default='',
                         help='The path to the checkpoint file to run model predict')
-    parser.add_argument('--model_mp', type=str, default='resnet18', help='model name to run predict')
+    parser.add_argument('--model_mp', '-mp', type=str, default='resnet18', help='model name to run predict')
+    parser.add_argument('--retina-masks', action='store_true', help='whether to plot masks in native resolution')
+    parser.add_argument('--weights_seg', nargs='+', type=str, default=ROOT / 'yolo-seg.pt',
+                        help='model segment path(s)')
+    parser.add_argument('--conf-seg', type=float, default=0.5, help='confidence threshold segment')
+
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
