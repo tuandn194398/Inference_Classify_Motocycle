@@ -270,7 +270,6 @@ def run(
                         # color_label = color_classes[idx]
 
                         # use motorbike model (2)
-<<<<<<< HEAD
                         model_cls = Models(model=model_mp)
                         model_cls.load_weight(checkpoint)
                         result = model_cls.infer(imgbb_seg)
@@ -292,13 +291,11 @@ def run(
                         #     color_label = 'blue'
                         # elif j == 7:
                         #     continue
-=======
                         # model_cls = Models(model=model_mp)
                         # model_cls.load_weight(checkpoint)
                         # result = model_cls.infer(imgbb_seg)
                         # print(f"Image: {p.stem}.jpg, Prediction: {result}")
                         # draw label in the image
->>>>>>> f10140a96f1718466a0517fd137b86f0a5213f31
                         print(p.stem, color_label)
                         label = None if hide_labels else (
                             # f'{names[c][:5]}:{color_label}' if hide_conf else f'{names[c][:5]}{conf:.2f}{color_label}')
